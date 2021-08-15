@@ -3,8 +3,9 @@ from __future__ import print_function, division
 import sys
 import time
 import torch
+import numpy as np
 
-from .util import AverageMeter, accuracy
+from .util import AverageMeter, accuracy, confusion_matrix
 
 
 def train_vanilla(epoch, train_loader, model, criterion, optimizer, opt):
@@ -215,7 +216,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     return top1.avg, losses.avg
 
 
-def validate(val_loader, model, criterion, opt):
+def validate(val_loader, model, criterion, opt, logger, epoch):
     """validation"""
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -224,7 +225,8 @@ def validate(val_loader, model, criterion, opt):
 
     # switch to evaluate mode
     model.eval()
-
+    all_preds = []
+    all_targets = []
     with torch.no_grad():
         end = time.time()
         for idx, (input, target) in enumerate(val_loader):
@@ -248,6 +250,10 @@ def validate(val_loader, model, criterion, opt):
             batch_time.update(time.time() - end)
             end = time.time()
 
+            _, pred = torch.max(output, 1)
+            all_preds.extend(pred.cpu().numpy())
+            all_targets.extend(target.cpu().numpy())
+
             if idx % opt.print_freq == 0:
                 print('Test: [{0}/{1}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -260,4 +266,21 @@ def validate(val_loader, model, criterion, opt):
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
 
-    return top1.avg, top5.avg, losses.avg
+        cf = confusion_matrix(all_targets, all_preds).astype(float)
+        cls_cnt = cf.sum(axis=1)
+        cls_hit = np.diag(cf)
+        cls_acc = cls_hit / cls_cnt
+        output = ('Results: Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
+                  .format(top1=top1, top5=top5, loss=losses))
+        out_cls_acc = 'Class Accuracy: %s' % (
+            (np.array2string(cls_acc, separator=',', formatter={'float_kind': lambda x: "%.3f" % x})))
+        print(output)
+        print(out_cls_acc)
+
+    logger.log_value('test/loss', losses.avg, epoch)
+    logger.log_value('test/acc_top1', top1.avg, epoch)
+    logger.log_value('test/acc_top5', top5.avg, epoch)
+    for i, x in enumerate(cls_acc):
+        logger.log_value('test/class_acc_'+str(i), x, epoch)
+
+    return top1.avg, top5.avg, losses.avg, cls_acc

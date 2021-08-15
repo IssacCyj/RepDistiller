@@ -21,8 +21,9 @@ from models.util import Embed, ConvReg, LinearEmbed
 from models.util import Connector, Translator, Paraphraser
 
 from dataset.cifar100 import get_cifar100_dataloaders, get_cifar100_dataloaders_sample
+from dataset.cifar10 import get_cifar10_dataloaders, get_cifar10_dataloaders_sample
 
-from helper.util import adjust_learning_rate
+from helper.util import adjust_learning_rate, ImbalancedDatasetSampler
 
 from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss
 from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss
@@ -54,7 +55,7 @@ def parse_option():
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100'], help='dataset')
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar100', 'cifar10'], help='dataset')
 
     # model
     parser.add_argument('--model_s', type=str, default='resnet8',
@@ -87,6 +88,11 @@ def parse_option():
     # hint layer
     parser.add_argument('--hint_layer', default=2, type=int, choices=[0, 1, 2, 3, 4])
 
+    parser.add_argument('--train_rule', default='None', type=str,
+                        choices=['None', 'Resample', 'Reweight', 'DRW'])
+    parser.add_argument('--mask_head', default=-1, type=int, help='number of head masked used for kd and ce loss')
+    parser.add_argument('--mask_head_ce', default=0, type=int, help='0 for no mask, 1 for mask head, 2 for mask tail')
+
     opt = parser.parse_args()
 
     # set different learning rate from these 4 models
@@ -108,8 +114,8 @@ def parse_option():
 
     opt.model_t = get_teacher_name(opt.path_t)
 
-    opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_{}'.format(opt.model_s, opt.model_t, opt.dataset, opt.distill,
-                                                                opt.gamma, opt.alpha, opt.beta, opt.trial)
+    opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_{}_{}'.format(opt.model_s, opt.model_t, opt.dataset, opt.distill,
+                                                                opt.gamma, opt.alpha, opt.beta, opt.trial, opt.train_rule)
 
     opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
     if not os.path.isdir(opt.tb_folder):
@@ -126,7 +132,10 @@ def get_teacher_name(model_path):
     """parse teacher name"""
     segments = model_path.split('/')[-2].split('_')
     if segments[0] != 'wrn':
-        return segments[0]
+        if 'S:' not in segments[0]:
+            return segments[0]
+        else:
+            return segments[0].split('S:')[-1]
     else:
         return segments[0] + '_' + segments[1] + '_' + segments[2]
 
@@ -142,6 +151,7 @@ def load_teacher(model_path, n_cls):
 
 def main():
     best_acc = 0
+    best_cls_acc = []
 
     opt = parse_option()
 
@@ -154,12 +164,27 @@ def main():
             train_loader, val_loader, n_data = get_cifar100_dataloaders_sample(batch_size=opt.batch_size,
                                                                                num_workers=opt.num_workers,
                                                                                k=opt.nce_k,
-                                                                               mode=opt.mode)
+                                                                               mode=opt.mode,
+                                                                               train_rule=opt.train_rule)
         else:
             train_loader, val_loader, n_data = get_cifar100_dataloaders(batch_size=opt.batch_size,
                                                                         num_workers=opt.num_workers,
-                                                                        is_instance=True)
+                                                                        is_instance=True,
+                                                                        train_rule=opt.train_rule)
         n_cls = 100
+    elif opt.dataset == 'cifar10':
+        if opt.distill in ['crd']:
+            train_loader, val_loader, n_data = get_cifar10_dataloaders_sample(batch_size=opt.batch_size,
+                                                                               num_workers=opt.num_workers,
+                                                                               k=opt.nce_k,
+                                                                               mode=opt.mode,
+                                                                              train_rule=opt.train_rule)
+        else:
+            train_loader, val_loader, n_data = get_cifar10_dataloaders(batch_size=opt.batch_size,
+                                                                        num_workers=opt.num_workers,
+                                                                        is_instance=True,
+                                                                       train_rule=opt.train_rule)
+        n_cls = 10
     else:
         raise NotImplementedError(opt.dataset)
 
@@ -178,10 +203,17 @@ def main():
     trainable_list = nn.ModuleList([])
     trainable_list.append(model_s)
 
-    criterion_cls = nn.CrossEntropyLoss()
-    criterion_div = DistillKL(opt.kd_T)
+    ce_weight = None
+    if opt.mask_head_ce == 1:
+        ce_weight = torch.ones(n_cls).cuda()
+        ce_weight[:opt.mask_head] = 0
+    elif opt.mask_head_ce == 2:
+        ce_weight = torch.zeros(n_cls).cuda()
+        ce_weight[:opt.mask_head] = 1
+    criterion_cls = nn.CrossEntropyLoss(weight=ce_weight)
+    criterion_div = DistillKL(opt.kd_T, opt.mask_head)
     if opt.distill == 'kd':
-        criterion_kd = DistillKL(opt.kd_T)
+        criterion_kd = DistillKL(opt.kd_T, opt.mask_head)
     elif opt.distill == 'hint':
         criterion_kd = HintLoss()
         regress_s = ConvReg(feat_s[opt.hint_layer].shape, feat_t[opt.hint_layer].shape)
@@ -284,7 +316,7 @@ def main():
         cudnn.benchmark = True
 
     # validate teacher accuracy
-    teacher_acc, _, _ = validate(val_loader, model_t, criterion_cls, opt)
+    teacher_acc, _, _, _ = validate(val_loader, model_t, criterion_cls, opt, logger, 0)
     print('teacher accuracy: ', teacher_acc)
 
     # routine
@@ -301,15 +333,13 @@ def main():
         logger.log_value('train_acc', train_acc, epoch)
         logger.log_value('train_loss', train_loss, epoch)
 
-        test_acc, tect_acc_top5, test_loss = validate(val_loader, model_s, criterion_cls, opt)
+        test_acc, tect_acc_top5, test_loss, cls_acc = validate(val_loader, model_s, criterion_cls, opt, logger, epoch)
 
-        logger.log_value('test_acc', test_acc, epoch)
-        logger.log_value('test_loss', test_loss, epoch)
-        logger.log_value('test_acc_top5', tect_acc_top5, epoch)
 
         # save the best model
         if test_acc > best_acc:
             best_acc = test_acc
+            best_cls_acc = cls_acc
             state = {
                 'epoch': epoch,
                 'model': model_s.state_dict(),
@@ -332,7 +362,7 @@ def main():
 
     # This best accuracy is only for printing purpose.
     # The results reported in the paper/README is from the last epoch. 
-    print('best accuracy:', best_acc)
+    print('best accuracy:', best_acc, best_cls_acc)
 
     # save model
     state = {

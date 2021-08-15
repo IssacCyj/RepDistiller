@@ -14,6 +14,7 @@ import torch.backends.cudnn as cudnn
 from models import model_dict
 
 from dataset.cifar100 import get_cifar100_dataloaders
+from dataset.cifar10 import get_cifar10_dataloaders
 
 from helper.util import adjust_learning_rate, accuracy, AverageMeter
 from helper.loops import train_vanilla as train, validate
@@ -45,9 +46,9 @@ def parse_option():
                                  'resnet8x4', 'resnet32x4', 'wrn_16_1', 'wrn_16_2', 'wrn_40_1', 'wrn_40_2',
                                  'vgg8', 'vgg11', 'vgg13', 'vgg16', 'vgg19',
                                  'MobileNetV2', 'ShuffleV1', 'ShuffleV2', ])
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100'], help='dataset')
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar100', 'cifar10'], help='dataset')
 
-    parser.add_argument('-t', '--trial', type=int, default=0, help='the experiment id')
+    parser.add_argument('-t', '--trial', type=str, default='first', help='the experiment id')
 
     opt = parser.parse_args()
     
@@ -84,6 +85,7 @@ def parse_option():
 
 def main():
     best_acc = 0
+    best_cls_acc = []
 
     opt = parse_option()
 
@@ -91,6 +93,9 @@ def main():
     if opt.dataset == 'cifar100':
         train_loader, val_loader = get_cifar100_dataloaders(batch_size=opt.batch_size, num_workers=opt.num_workers)
         n_cls = 100
+    elif opt.dataset == 'cifar10':
+        train_loader, val_loader = get_cifar10_dataloaders(batch_size=opt.batch_size, num_workers=opt.num_workers)
+        n_cls = 10
     else:
         raise NotImplementedError(opt.dataset)
 
@@ -127,15 +132,12 @@ def main():
         logger.log_value('train_acc', train_acc, epoch)
         logger.log_value('train_loss', train_loss, epoch)
 
-        test_acc, test_acc_top5, test_loss = validate(val_loader, model, criterion, opt)
-
-        logger.log_value('test_acc', test_acc, epoch)
-        logger.log_value('test_acc_top5', test_acc_top5, epoch)
-        logger.log_value('test_loss', test_loss, epoch)
+        test_acc, test_acc_top5, test_loss, cls_acc = validate(val_loader, model, criterion, opt, logger, epoch)
 
         # save the best model
         if test_acc > best_acc:
             best_acc = test_acc
+            best_cls_acc = cls_acc
             state = {
                 'epoch': epoch,
                 'model': model.state_dict(),
@@ -160,7 +162,7 @@ def main():
 
     # This best accuracy is only for printing purpose.
     # The results reported in the paper/README is from the last epoch.
-    print('best accuracy:', best_acc)
+    print('best accuracy:', best_acc, best_cls_acc)
 
     # save model
     state = {
