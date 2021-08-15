@@ -1,5 +1,6 @@
 .idea/
-save/
+save/models
+save/student_model
 data/
 output*/
 ckpts/
