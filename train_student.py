@@ -14,6 +14,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import numpy as np
 
 
 from models import model_dict
@@ -210,6 +211,16 @@ def main():
     elif opt.mask_head_ce == 2:
         ce_weight = torch.zeros(n_cls).cuda()
         ce_weight[:opt.mask_head] = 1
+
+    if opt.train_rule == 'Reweight':
+        cls_num_list = train_loader.dataset.get_cls_num_list()
+        beta = 0.9999
+        effective_num = 1.0 - np.power(beta, cls_num_list)
+        per_cls_weights = (1.0 - beta) / np.array(effective_num)
+        per_cls_weights = per_cls_weights / np.sum(per_cls_weights) * len(cls_num_list)
+        ce_weight = torch.FloatTensor(per_cls_weights).cuda()
+        print(f'Re-weighting {ce_weight}')
+
     criterion_cls = nn.CrossEntropyLoss(weight=ce_weight)
     criterion_div = DistillKL(opt.kd_T, opt.mask_head)
     if opt.distill == 'kd':
