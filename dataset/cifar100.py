@@ -6,6 +6,8 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from PIL import Image
+from dataset.imbalance_cifar import ImbalanceCIFAR100
+from helper.util import ImbalancedDatasetSampler
 
 """
 mean = {
@@ -19,31 +21,14 @@ std = {
 
 
 def get_data_folder():
-    """
-    return server-dependent path to store the data
-    """
-    hostname = socket.gethostname()
-    if hostname.startswith('visiongpu'):
-        data_folder = '/data/vision/phillipi/rep-learn/datasets'
-    elif hostname.startswith('yonglong-home'):
-        data_folder = '/home/yonglong/Data/data'
-    else:
-        data_folder = './data/'
-
-    if not os.path.isdir(data_folder):
-        os.makedirs(data_folder)
-
-    return data_folder
+    return '/media/data'
 
 
-class CIFAR100Instance(datasets.CIFAR100):
+class CIFAR100Instance(ImbalanceCIFAR100):
     """CIFAR100Instance Dataset.
     """
     def __getitem__(self, index):
-        if self.train:
-            img, target = self.train_data[index], self.train_labels[index]
-        else:
-            img, target = self.test_data[index], self.test_labels[index]
+        img, target = self.data[index], self.targets[index]
 
         # doing this so that it is consistent with all other datasets
         # to return a PIL Image
@@ -58,7 +43,7 @@ class CIFAR100Instance(datasets.CIFAR100):
         return img, target, index
 
 
-def get_cifar100_dataloaders(batch_size=128, num_workers=8, is_instance=False):
+def get_cifar100_dataloaders(batch_size=128, num_workers=8, is_instance=False, train_rule=None):
     """
     cifar 100
     """
@@ -82,13 +67,18 @@ def get_cifar100_dataloaders(batch_size=128, num_workers=8, is_instance=False):
                                      transform=train_transform)
         n_data = len(train_set)
     else:
-        train_set = datasets.CIFAR100(root=data_folder,
+        train_set = ImbalanceCIFAR100(root=data_folder,
                                       download=True,
                                       train=True,
                                       transform=train_transform)
+    train_sampler = None
+    if train_rule == 'Resample':
+        train_sampler = ImbalancedDatasetSampler(train_set)
+
     train_loader = DataLoader(train_set,
                               batch_size=batch_size,
-                              shuffle=True,
+                              shuffle=(train_sampler is None),
+                              sampler=train_sampler,
                               num_workers=num_workers)
 
     test_set = datasets.CIFAR100(root=data_folder,
@@ -99,6 +89,9 @@ def get_cifar100_dataloaders(batch_size=128, num_workers=8, is_instance=False):
                              batch_size=int(batch_size/2),
                              shuffle=False,
                              num_workers=int(num_workers/2))
+    cls_num_list = train_set.get_cls_num_list()
+    print('train cls num list:')
+    print(cls_num_list)
 
     if is_instance:
         return train_loader, test_loader, n_data
@@ -106,7 +99,7 @@ def get_cifar100_dataloaders(batch_size=128, num_workers=8, is_instance=False):
         return train_loader, test_loader
 
 
-class CIFAR100InstanceSample(datasets.CIFAR100):
+class CIFAR100InstanceSample(ImbalanceCIFAR100):
     """
     CIFAR100Instance+Sample Dataset
     """
@@ -120,26 +113,29 @@ class CIFAR100InstanceSample(datasets.CIFAR100):
         self.is_sample = is_sample
 
         num_classes = 100
-        if self.train:
-            num_samples = len(self.train_data)
-            label = self.train_labels
-        else:
-            num_samples = len(self.test_data)
-            label = self.test_labels
+        num_samples = len(self.data)
+        label = self.targets
+
+        cls_num = self.get_cls_num_list()
+        cls_prob = [(1. / num) ** 2 for num in cls_num]
 
         self.cls_positive = [[] for i in range(num_classes)]
         for i in range(num_samples):
             self.cls_positive[label[i]].append(i)
 
         self.cls_negative = [[] for i in range(num_classes)]
+        self.cls_negative_prob = [[] for i in range(num_classes)]
         for i in range(num_classes):
             for j in range(num_classes):
                 if j == i:
                     continue
                 self.cls_negative[i].extend(self.cls_positive[j])
+                self.cls_negative_prob[i].extend([cls_prob[j]] * len(self.cls_positive[j]))
 
         self.cls_positive = [np.asarray(self.cls_positive[i]) for i in range(num_classes)]
         self.cls_negative = [np.asarray(self.cls_negative[i]) for i in range(num_classes)]
+        self.cls_negative_prob = [np.asarray(self.cls_negative_prob[i])/np.sum(self.cls_negative_prob[i]) for i in range(num_classes)]
+
 
         if 0 < percent < 1:
             n = int(len(self.cls_negative[0]) * percent)
@@ -150,10 +146,7 @@ class CIFAR100InstanceSample(datasets.CIFAR100):
         self.cls_negative = np.asarray(self.cls_negative)
 
     def __getitem__(self, index):
-        if self.train:
-            img, target = self.train_data[index], self.train_labels[index]
-        else:
-            img, target = self.test_data[index], self.test_labels[index]
+        img, target = self.data[index], self.targets[index]
 
         # doing this so that it is consistent with all other datasets
         # to return a PIL Image
@@ -178,13 +171,14 @@ class CIFAR100InstanceSample(datasets.CIFAR100):
             else:
                 raise NotImplementedError(self.mode)
             replace = True if self.k > len(self.cls_negative[target]) else False
-            neg_idx = np.random.choice(self.cls_negative[target], self.k, replace=replace)
+            neg_idx = np.random.choice(self.cls_negative[target], self.k, replace=replace, p=self.cls_negative_prob[target])
+            # neg_idx = np.random.choice(self.cls_negative[target], self.k, replace=replace)
             sample_idx = np.hstack((np.asarray([pos_idx]), neg_idx))
             return img, target, index, sample_idx
 
 
 def get_cifar100_dataloaders_sample(batch_size=128, num_workers=8, k=4096, mode='exact',
-                                    is_sample=True, percent=1.0):
+                                    is_sample=True, percent=1.0, train_rule=None):
     """
     cifar 100
     """
@@ -210,9 +204,19 @@ def get_cifar100_dataloaders_sample(batch_size=128, num_workers=8, k=4096, mode=
                                        is_sample=is_sample,
                                        percent=percent)
     n_data = len(train_set)
+
+    cls_num_list = train_set.get_cls_num_list()
+    print('train cls num list:')
+    print(cls_num_list)
+
+    train_sampler = None
+    if train_rule == 'Resample':
+        train_sampler = ImbalancedDatasetSampler(train_set)
+
     train_loader = DataLoader(train_set,
                               batch_size=batch_size,
-                              shuffle=True,
+                              shuffle=(train_sampler is None),
+                              sampler=train_sampler,
                               num_workers=num_workers)
 
     test_set = datasets.CIFAR100(root=data_folder,

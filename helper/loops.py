@@ -66,7 +66,7 @@ def train_vanilla(epoch, train_loader, model, criterion, optimizer, opt):
     return top1.avg, losses.avg
 
 
-def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, opt):
+def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, opt, logger, iteration):
     """One epoch distillation"""
     # set modules as train()
     for module in module_list:
@@ -94,6 +94,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
     end = time.time()
     for idx, data in enumerate(train_loader):
+        iteration += 1
         if opt.distill in ['crd']:
             input, target, index, contrast_idx = data
         else:
@@ -184,6 +185,10 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
         loss = opt.gamma * loss_cls + opt.alpha * loss_div + opt.beta * loss_kd
 
+        logger.log_value('train_loss/loss_ce', loss_cls, iteration)
+        logger.log_value('train_loss/loss_regularKD', loss_div, iteration)
+        logger.log_value('train_loss/loss_other', loss_kd, iteration)
+
         acc1, acc5 = accuracy(logit_s, target, topk=(1, 5))
         losses.update(loss.item(), input.size(0))
         top1.update(acc1[0], input.size(0))
@@ -213,10 +218,10 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
           .format(top1=top1, top5=top5))
 
-    return top1.avg, losses.avg
+    return top1.avg, losses.avg, iteration
 
 
-def validate(val_loader, model, criterion, opt, logger, epoch):
+def validate(val_loader, model, criterion, opt, logger, epoch, cls_num_list):
     """validation"""
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -277,10 +282,14 @@ def validate(val_loader, model, criterion, opt, logger, epoch):
         print(output)
         print(out_cls_acc)
 
+    group_cls_acc = {'many-shot': np.mean([acc for i, acc in enumerate(cls_acc) if cls_num_list[i] > 100]),
+                     'med-shot': np.mean([acc for i, acc in enumerate(cls_acc) if 100 >= cls_num_list[i] > 20]),
+                     'few-shot': np.mean([acc for i, acc in enumerate(cls_acc) if cls_num_list[i] <= 20])}
+
     logger.log_value('test/loss', losses.avg, epoch)
     logger.log_value('test/acc_top1', top1.avg, epoch)
     logger.log_value('test/acc_top5', top5.avg, epoch)
-    for i, x in enumerate(cls_acc):
-        logger.log_value('test/class_acc_'+str(i), x, epoch)
+    for k, v in group_cls_acc.items():
+        logger.log_value('test/class_acc_'+k, v, epoch)
 
     return top1.avg, top5.avg, losses.avg, cls_acc

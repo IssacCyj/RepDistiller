@@ -18,7 +18,7 @@ class DistillKL(nn.Module):
 
         if self.mask_head > 0:
             mask = torch.zeros(p_s.shape).cuda()
-            mask[:, self.mask_head:] = 1
+            mask[:, :self.mask_head] = 1
             p_s = p_s * mask
             p_t = p_t * mask
 

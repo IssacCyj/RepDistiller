@@ -212,8 +212,8 @@ def main():
         ce_weight = torch.zeros(n_cls).cuda()
         ce_weight[:opt.mask_head] = 1
 
+    cls_num_list = train_loader.dataset.get_cls_num_list()
     if opt.train_rule == 'Reweight':
-        cls_num_list = train_loader.dataset.get_cls_num_list()
         beta = 0.9999
         effective_num = 1.0 - np.power(beta, cls_num_list)
         per_cls_weights = (1.0 - beta) / np.array(effective_num)
@@ -327,25 +327,25 @@ def main():
         cudnn.benchmark = True
 
     # validate teacher accuracy
-    teacher_acc, _, _, _ = validate(val_loader, model_t, criterion_cls, opt, logger, 0)
+    teacher_acc, _, _, _ = validate(val_loader, model_t, criterion_cls, opt, logger, 0, cls_num_list)
     print('teacher accuracy: ', teacher_acc)
 
     # routine
+    iteration = 0
     for epoch in range(1, opt.epochs + 1):
 
         adjust_learning_rate(epoch, opt, optimizer)
         print("==> training...")
 
         time1 = time.time()
-        train_acc, train_loss = train(epoch, train_loader, module_list, criterion_list, optimizer, opt)
+        train_acc, train_loss, iteration = train(epoch, train_loader, module_list, criterion_list, optimizer, opt, logger, iteration)
         time2 = time.time()
         print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
         logger.log_value('train_acc', train_acc, epoch)
         logger.log_value('train_loss', train_loss, epoch)
 
-        test_acc, tect_acc_top5, test_loss, cls_acc = validate(val_loader, model_s, criterion_cls, opt, logger, epoch)
-
+        test_acc, tect_acc_top5, test_loss, cls_acc = validate(val_loader, model_s, criterion_cls, opt, logger, epoch, cls_num_list)
 
         # save the best model
         if test_acc > best_acc:
